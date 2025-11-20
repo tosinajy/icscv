@@ -1,0 +1,32 @@
+<div class="container">
+    <div id="results-container" class="results-container">
+        
+        <div id="ad-results-native" class="ad-placeholder ad-banner-native">
+            AD SPACE - NATIVE RESULTS (100% Width)
+        </div>
+
+        <div id="status-message" class="text-center py-4">
+            <div class="spinner-border text-primary mb-3" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="lead text-muted">Searching database...</p>
+        </div>
+        
+        <div class="table-responsive">
+            <table class="table table-hover table-borderless align-middle" id="results-table" style="display:none;">
+                <thead class="table-primary-header">
+                    <tr>
+                        <th class="ps-4 rounded-start">Carrier Name</th>
+                        <th>NAIC</th>
+                        <th>Payer ID</th>
+                        <th>LOB</th>
+                        <th>Claims Phone</th>
+                        <th class="rounded-end">Action</th>
+                    </tr>
+                </thead>
+                <tbody id="results-body">
+                    </tbody>
+            </table>
+        </div>
+    </div>
+</div>

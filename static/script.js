@@ -1,132 +1,131 @@
 document.addEventListener('DOMContentLoaded', function() {
     const searchInput = document.getElementById('search-input');
     const searchButton = document.getElementById('search-button');
+    const resultsContainer = document.getElementById('results-container');
     const resultsTable = document.getElementById('results-table');
     const resultsBody = document.getElementById('results-body');
     const statusMessage = document.getElementById('status-message');
-    const adNative = document.getElementById('ad-results-native');
-
+    
     // --- Core Functions ---
 
-    // Utility function to copy text to clipboard
     function copyToClipboard(text) {
-        // Use document.execCommand for better compatibility within iframes
+        if (!text || text === 'null' || text === 'undefined') return;
+        
         const tempInput = document.createElement('input');
-        tempInput.value = text;
+        tempInput.value = text.trim();
         document.body.appendChild(tempInput);
         tempInput.select();
         document.execCommand('copy');
         document.body.removeChild(tempInput);
 
-        // Simple notification (since alert is forbidden, we use a basic DOM element)
-        showNotification('Copied: ' + text);
-    }
-
-    // Function to show transient notification (in lieu of alert)
-    function showNotification(message) {
-        let notif = document.getElementById('copy-notification');
-        if (!notif) {
-            notif = document.createElement('div');
-            notif.id = 'copy-notification';
-            notif.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #28a745; color: white; padding: 10px 20px; border-radius: 5px; z-index: 10000; opacity: 0; transition: opacity 0.5s;';
-            document.body.appendChild(notif);
-        }
-        notif.textContent = message;
-        notif.style.opacity = 1;
-        setTimeout(() => {
-            notif.style.opacity = 0;
-        }, 2000);
+        showToast('Copied to clipboard!');
     }
     
-    // Make copyToClipboard globally accessible for dynamically added buttons
+    // Expose to window for inline HTML onclicks
     window.copyToClipboard = copyToClipboard;
 
-    // Function to perform search
+    function showToast(message) {
+        // Simple toast implementation
+        let toast = document.createElement('div');
+        toast.className = 'position-fixed bottom-0 end-0 p-3';
+        toast.style.zIndex = '11';
+        toast.innerHTML = `
+            <div class="toast show align-items-center text-white bg-success border-0" role="alert">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        <i class="fa-solid fa-check-circle me-2"></i> ${message}
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.remove(); }, 3000);
+    }
+
     function performSearch() {
         const query = searchInput.value.trim();
 
         if (!query) {
-            statusMessage.textContent = "Please enter a valid search term to begin verification.";
-            statusMessage.style.display = 'block';
-            resultsTable.style.display = 'none';
-            adNative.style.display = 'none';
+            alert("Please enter a search term.");
             return;
         }
 
-        statusMessage.textContent = "Searching...";
+        // 1. Feedback: Show the results container (previously hidden)
+        resultsContainer.style.display = 'block';
         
+        // 2. Feedback: Show loading state
+        statusMessage.innerHTML = `
+            <div class="spinner-border text-primary mb-3" role="status"></div>
+            <p class="lead text-muted">Searching database for "<strong>${query}</strong>"...</p>
+        `;
+        statusMessage.style.display = 'block';
+        resultsTable.style.display = 'none';
+
+        // 3. Fetch Data
         fetch(`/api/search?q=${encodeURIComponent(query)}`)
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.json();
-            })
+            .then(response => response.json())
             .then(data => {
-                resultsBody.innerHTML = ''; // Clear previous results
+                resultsBody.innerHTML = ''; 
 
                 if (data.length === 0) {
-                    statusMessage.textContent = "No carriers found matching that criteria.";
-                    statusMessage.style.display = 'block';
-                    resultsTable.style.display = 'none';
-                    adNative.style.display = 'block';
+                    statusMessage.innerHTML = `<div class="text-danger"><i class="fa-regular fa-face-frown fa-2x mb-2"></i><p>No carriers found matching "${query}".</p></div>`;
                 } else {
                     statusMessage.style.display = 'none';
-                    adNative.style.display = 'block';
                     resultsTable.style.display = 'table';
 
-                    // Populate Table with new data and copy buttons
                     data.forEach(carrier => {
                         const row = document.createElement('tr');
                         
                         const name = carrier.legal_name || 'N/A';
-                        const state = carrier.state_domicile ? ` (${carrier.state_domicile})` : '';
+                        const state = carrier.state_domicile ? `<span class="badge bg-light text-dark border ms-2">${carrier.state_domicile}</span>` : '';
                         const naic = carrier.naic_code || 'N/A';
                         const payer = carrier.payer_id || 'N/A';
-                        const lob = carrier.line_of_business || '-';
+                        const lob = carrier.line_of_business || '<span class="text-muted">-</span>';
                         const claimsPhone = carrier.phone_claims || 'N/A';
-                        
-                        // Function to create an element with copy button
-                        const createCopyCell = (value) => {
-                            if (value === 'N/A' || value === null) return value;
+
+                        // Action Button (View Details)
+                        const detailsBtn = naic !== 'N/A' ? 
+                            `<a href="/carrier/${naic}" class="btn btn-sm btn-primary rounded-pill px-3">Details <i class="fa-solid fa-arrow-right ms-1"></i></a>` : 
+                            '<span class="text-muted">-</span>';
+
+                        // Helper for copyable cells
+                        const createCopyCell = (val) => {
+                            if(val === 'N/A') return `<span class="text-muted">N/A</span>`;
                             return `
-                                <span>${value}</span>
-                                <button class="copy-btn" onclick="window.copyToClipboard('${value}')" title="Copy ${value}">
-                                    <i class="fa-regular fa-clipboard"></i>
-                                </button>
+                                <div class="d-flex align-items-center">
+                                    <span class="me-2">${val}</span>
+                                    <button class="copy-btn" onclick="window.copyToClipboard('${val}')"><i class="fa-regular fa-copy"></i></button>
+                                </div>
                             `;
                         };
 
-                        const detailsLink = naic !== 'N/A' ? 
-                            `<a href="/carrier/${naic}" class="btn btn-sm btn-outline-primary" title="View all addresses and phones">View Details</a>` : 
-                            '-';
-
                         row.innerHTML = `
-                            <td><strong>${name}</strong>${state}</td>
+                            <td class="ps-4 fw-bold text-primary">${name} ${state}</td>
                             <td>${createCopyCell(naic)}</td>
                             <td>${createCopyCell(payer)}</td>
                             <td>${lob}</td>
                             <td>${claimsPhone}</td>
-                            <td>${detailsLink}</td>
+                            <td class="pe-4">${detailsBtn}</td>
                         `;
                         resultsBody.appendChild(row);
                     });
+                    
+                    // Scroll to results
+                    resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }
             })
             .catch(error => {
-                console.error('Fetch Error:', error);
-                statusMessage.textContent = "Search failed. Please check the server connection and try again.";
-                statusMessage.style.display = 'block';
-                resultsTable.style.display = 'none';
+                console.error('Error:', error);
+                statusMessage.innerHTML = `<div class="text-danger">Search failed. Please try again.</div>`;
             });
     }
 
     // --- Event Listeners ---
-    searchButton.addEventListener('click', performSearch);
-
-    searchInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            performSearch();
-        }
-    });
+    if(searchButton) {
+        searchButton.addEventListener('click', performSearch);
+        searchInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') performSearch();
+        });
+    }
 });

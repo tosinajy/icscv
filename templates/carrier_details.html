@@ -1,158 +1,127 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Carrier Details | {{ carrier.legal_name if carrier else naic_code }}</title>
-    <!-- Bootstrap 5 CDN -->
-    <link href="[https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css](https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css)" rel="stylesheet">
-    <!-- Font Awesome for Icons -->
-    <link rel="stylesheet" href="[https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css](https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css)">
-    <!-- Custom Styles (Matching the index page for consistency) -->
-    <style>
-        :root {
-            --primary-blue: #007bff; 
-            --light-bg: #f5f8ff; 
-            --shadow-subtle: 0 4px 12px rgba(0, 0, 0, 0.08);
-        }
-        body { background-color: var(--light-bg); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .app-header {
-            padding: 10px 0;
-            border-bottom: 3px solid var(--primary-blue);
-            background-color: #fff;
-        }
-        .logo-text {
-            font-weight: 700;
-            color: var(--primary-blue);
-        }
-        .card-details {
-            box-shadow: var(--shadow-subtle);
-            border-radius: 8px;
-        }
-        .detail-row {
-            padding: 10px 0;
-            border-bottom: 1px solid #eee;
-        }
-        .detail-row:last-child { border-bottom: none; }
-        .copy-btn {
-            background: none;
-            border: none;
-            color: var(--primary-blue);
-            padding: 0 5px;
-            font-size: 0.9em;
-        }
-    </style>
-</head>
-<body>
+{% extends 'base.html' %}
+
+{% block title %}{{ carrier.legal_name if carrier else 'Carrier Not Found' }} | Details{% endblock %}
+
+{% block content %}
+<div class="container my-5">
     
-    <!-- HEADER -->
-    <header class="app-header mb-4">
-        <div class="container d-flex justify-content-between align-items-center">
-            <h4 class="logo-text m-0">CarrierCodeVerify</h4>
-            <a href="/" class="btn btn-sm btn-outline-primary"><i class="fa-solid fa-arrow-left"></i> Back to Search</a>
-        </div>
-    </header>
-
-    <div class="container my-5">
-        {% if carrier %}
-            <h1 class="display-6 mb-4">{{ carrier.legal_name or 'Carrier Details' }} ({{ carrier.state_domicile or 'N/A' }})</h1>
-            
-            <div class="card p-4 card-details">
-                <!-- Core IDs -->
-                <h3 class="border-bottom pb-2 mb-3">Identification Codes</h3>
-                <div class="row">
-                    <div class="col-md-4 detail-row">
-                        <strong>NAIC Code:</strong> 
-                        <span id="naic-code">{{ carrier.naic_code or 'N/A' }}</span>
-                        <button class="copy-btn" onclick="copyValue('naic-code')"><i class="fa-regular fa-clipboard"></i></button>
-                    </div>
-                    <div class="col-md-4 detail-row">
-                        <strong>Payer ID:</strong> 
-                        <span id="payer-id">{{ carrier.payer_id or 'N/A' }}</span>
-                        <button class="copy-btn" onclick="copyValue('payer-id')"><i class="fa-regular fa-clipboard"></i></button>
-                    </div>
-                    <div class="col-md-4 detail-row">
-                        <strong>LOB:</strong> {{ carrier.line_of_business or 'N/A' }}
-                    </div>
-                </div>
-
-                <!-- Claims Address -->
-                <h3 class="border-bottom pb-2 mb-3 mt-4">Paper Claims Address</h3>
-                <div class="row">
-                    <div class="col-md-12 detail-row">
-                        <span id="claims-address-full">
-                            {{ carrier.address_claims_street or 'N/A' }}, 
-                            {{ carrier.address_claims_city or 'N/A' }}, 
-                            {{ carrier.address_claims_state or 'N/A' }} 
-                            {{ carrier.address_claims_zip or 'N/A' }}
-                        </span>
-                        <button class="copy-btn" onclick="copyValue('claims-address-full')"><i class="fa-regular fa-clipboard"></i></button>
-                    </div>
-                </div>
-                
-                <!-- Contact Phones -->
-                <h3 class="border-bottom pb-2 mb-3 mt-4">Department Contact Numbers</h3>
-                <div class="row">
-                    <div class="col-md-4 detail-row">
-                        <strong>Claims Support:</strong> {{ carrier.phone_claims or 'N/A' }}
-                    </div>
-                    <div class="col-md-4 detail-row">
-                        <strong>Prior Authorization:</strong> {{ carrier.phone_prior_auth or 'N/A' }}
-                    </div>
-                    <div class="col-md-4 detail-row">
-                        <strong>Eligibility & Benefits:</strong> {{ carrier.phone_eligibility or 'N/A' }}
-                    </div>
-                </div>
-
-                <!-- General Info -->
-                <h3 class="border-bottom pb-2 mb-3 mt-4">General Information</h3>
-                <div class="row">
-                    <div class="col-md-4 detail-row">
-                        <strong>Website:</strong> 
-                        {% if carrier.website_url %}
-                            <a href="{{ carrier.website_url }}" target="_blank" class="text-primary">Visit Site <i class="fa-solid fa-up-right-from-square small"></i></a>
-                        {% else %}
-                            N/A
-                        {% endif %}
-                    </div>
-                    <div class="col-md-4 detail-row">
-                        <strong>State of Domicile:</strong> {{ carrier.state_domicile or 'N/A' }}
-                    </div>
-                    <div class="col-md-4 detail-row">
-                        <strong>General Contact:</strong> {{ carrier.contact_phone or 'N/A' }}
-                    </div>
-                </div>
-
-            </div>
-
-        {% else %}
-            <div class="alert alert-danger text-center" role="alert">
-                <h4 class="alert-heading">Carrier Not Found</h4>
-                <p>We could not find a carrier with the NAIC Code: <strong>{{ naic_code }}</strong>.</p>
-                <hr>
-                <a href="/" class="btn btn-primary">Return to Search</a>
-            </div>
-        {% endif %}
+    <div class="ad-placeholder ad-banner-top mb-5">
+        AD SPACE - DETAIL TOP (970x90)
     </div>
 
-    <!-- Simple JS for Copy Functionality -->
-    <script>
-        function copyValue(elementId) {
-            const element = document.getElementById(elementId);
-            if (element) {
-                const textToCopy = element.textContent.trim();
-                // Use execCommand for broader iframe compatibility
-                const tempInput = document.createElement('input');
-                tempInput.value = textToCopy;
-                document.body.appendChild(tempInput);
-                tempInput.select();
-                document.execCommand('copy');
-                document.body.removeChild(tempInput);
-                
-                // Provide visual feedback
-                alert('Copied to clipboard: ' + textToCopy);
-            }
-        }
-    </script>
-</body>
-</html>
+    {% if carrier %}
+        <div class="d-flex align-items-center mb-4">
+            <div class="bg-primary text-white rounded-circle d-flex align-items-center justify-content-center me-3 shadow-sm" style="width: 60px; height: 60px; font-size: 1.5rem;">
+                <i class="fa-solid fa-building"></i>
+            </div>
+            <div>
+                <h1 class="h2 fw-bold mb-0">{{ carrier.legal_name }}</h1>
+                <span class="badge bg-secondary">{{ carrier.state_domicile }} Domicile</span>
+                <span class="badge bg-info text-dark ms-1">{{ carrier.line_of_business or 'General' }}</span>
+            </div>
+        </div>
+
+        <div class="row g-4">
+            <div class="col-lg-6">
+                <div class="card detail-card h-100">
+                    <div class="card-header-custom">
+                        <i class="fa-solid fa-fingerprint me-2"></i>Identification Codes
+                    </div>
+                    <div class="card-body p-0">
+                        <ul class="list-group list-group-flush">
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                <div>
+                                    <span class="info-label">NAIC Code</span>
+                                    <span class="info-value" id="naic-val">{{ carrier.naic_code }}</span>
+                                </div>
+                                <button class="btn btn-light btn-sm text-primary" onclick="copyToClipboard('{{ carrier.naic_code }}')">
+                                    <i class="fa-regular fa-copy"></i> Copy
+                                </button>
+                            </li>
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                <div>
+                                    <span class="info-label">Payer ID</span>
+                                    <span class="info-value" id="payer-val">{{ carrier.payer_id or 'N/A' }}</span>
+                                </div>
+                                {% if carrier.payer_id %}
+                                <button class="btn btn-light btn-sm text-primary" onclick="copyToClipboard('{{ carrier.payer_id }}')">
+                                    <i class="fa-regular fa-copy"></i> Copy
+                                </button>
+                                {% endif %}
+                            </li>
+                            <li class="list-group-item">
+                                <span class="info-label">Website</span>
+                                {% if carrier.website_url %}
+                                    <a href="{{ carrier.website_url }}" target="_blank" class="text-decoration-none fw-bold">
+                                        {{ carrier.website_url }} <i class="fa-solid fa-external-link-alt ms-1 small"></i>
+                                    </a>
+                                {% else %}
+                                    <span class="text-muted">Not Available</span>
+                                {% endif %}
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-6">
+                <div class="card detail-card h-100">
+                    <div class="card-header-custom">
+                        <i class="fa-solid fa-headset me-2"></i>Contact & Claims
+                    </div>
+                    <div class="card-body p-0">
+                        <ul class="list-group list-group-flush">
+                            <li class="list-group-item">
+                                <div class="row">
+                                    <div class="col-6">
+                                        <span class="info-label">Claims Phone</span>
+                                        <div class="info-value text-primary">{{ carrier.phone_claims or 'N/A' }}</div>
+                                    </div>
+                                    <div class="col-6">
+                                        <span class="info-label">Eligibility Phone</span>
+                                        <div class="info-value">{{ carrier.phone_eligibility or 'N/A' }}</div>
+                                    </div>
+                                </div>
+                            </li>
+                            <li class="list-group-item">
+                                <span class="info-label mb-2">Paper Claims Address</span>
+                                <div class="d-flex">
+                                    <div class="me-auto">
+                                        {% if carrier.address_claims_street %}
+                                            <div class="fw-bold">{{ carrier.address_claims_street }}</div>
+                                            <div>{{ carrier.address_claims_city }}, {{ carrier.address_claims_state }} {{ carrier.address_claims_zip }}</div>
+                                        {% else %}
+                                            <span class="text-muted">Address on file not available.</span>
+                                        {% endif %}
+                                    </div>
+                                    <button class="btn btn-light btn-sm align-self-start" onclick="copyToClipboard('{{ carrier.address_claims_street }} {{ carrier.address_claims_city }} {{ carrier.address_claims_state }} {{ carrier.address_claims_zip }}')">
+                                        <i class="fa-regular fa-copy"></i>
+                                    </button>
+                                </div>
+                            </li>
+                            <li class="list-group-item">
+                                <span class="info-label">Prior Authorization</span>
+                                <div class="info-value">{{ carrier.phone_prior_auth or 'N/A' }}</div>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    {% else %}
+        <div class="alert alert-warning text-center py-5 shadow-sm" role="alert">
+            <i class="fa-solid fa-circle-exclamation fa-3x mb-3 text-warning"></i>
+            <h2 class="alert-heading">Carrier Not Found</h2>
+            <p>We could not locate a carrier with NAIC Code: <strong>{{ naic_code }}</strong></p>
+            <hr>
+            <a href="/" class="btn btn-primary">Return to Search</a>
+        </div>
+    {% endif %}
+
+    <div class="ad-placeholder ad-banner-top mt-5">
+        AD SPACE - DETAIL BOTTOM (970x90)
+    </div>
+
+</div>
+{% endblock %}
