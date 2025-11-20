@@ -1,13 +1,41 @@
 import os
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+import smtplib
+import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
 import mysql.connector
 from mysql.connector import Error
-from config import DB_CONFIG
+from config import DB_CONFIG, MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER, MAIL_ADMIN_RECEIVER
 
 app = Flask(__name__)
+app.secret_key = 'super-secret-key-change-this-in-prod'  # Required for flash messages
 
+# --- Security: Simple In-Memory Rate Limiter ---
+# Stores ip: timestamp to prevent spamming the email endpoint
+request_log = {}
+
+def is_rate_limited(ip_address):
+    current_time = time.time()
+    # Remove old entries (older than 1 hour)
+    for ip in list(request_log.keys()):
+        if current_time - request_log[ip]['start_time'] > 3600:
+            del request_log[ip]
+            
+    if ip_address not in request_log:
+        request_log[ip_address] = {'count': 1, 'start_time': current_time}
+        return False
+    
+    user_data = request_log[ip_address]
+    # Limit: 5 requests per hour per IP
+    if user_data['count'] >= 5:
+        return True
+    
+    user_data['count'] += 1
+    return False
+
+# --- Database Connection ---
 def get_db_connection():
-    """Attempts to establish and return a new MySQL connection."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         return conn
@@ -15,18 +43,49 @@ def get_db_connection():
         print(f"Error connecting to MySQL: {e}")
         return None
 
+# --- Email Function ---
+def send_issue_email(naic, name, comments):
+    msg = MIMEMultipart()
+    msg['From'] = MAIL_DEFAULT_SENDER
+    msg['To'] = MAIL_ADMIN_RECEIVER
+    msg['Subject'] = f"Issue Reported: {name} (NAIC: {naic})"
+
+    body = f"""
+    A user has reported an issue with a carrier.
+    
+    ----------------------------------------
+    Carrier Name: {name}
+    NAIC Code:    {naic}
+    ----------------------------------------
+    
+    User Comments:
+    {comments}
+    
+    ----------------------------------------
+    Sent from CarrierCodeVerify
+    """
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        server = smtplib.SMTP(MAIL_SERVER, MAIL_PORT)
+        if MAIL_USE_TLS:
+            server.starttls()
+        server.login(MAIL_USERNAME, MAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Email Error: {e}")
+        return False
+
 # --- Routes ---
 
 @app.route('/')
 def index():
-    """Renders the main search frontend template."""
     return render_template('index.html')
 
 @app.route('/api/search', methods=['GET'])
 def search_carriers():
-    """
-    API Endpoint: Performs case-insensitive search.
-    """
     search_term = request.args.get('q', '').strip()
     if not search_term:
         return jsonify([])
@@ -46,39 +105,61 @@ def search_carriers():
                    OR LOWER(payer_id) LIKE %s
                 LIMIT 50
             """
-            wildcard_term = f"%{search_term.lower()}%"
-            params = (wildcard_term, wildcard_term, wildcard_term)
-            
-            cursor.execute(query, params)
-            results = cursor.fetchall()
-            
-            return jsonify(results)
-
+            wildcard = f"%{search_term.lower()}%"
+            cursor.execute(query, (wildcard, wildcard, wildcard))
+            return jsonify(cursor.fetchall())
     except Error as e:
         print(f"Query Error: {e}")
         return jsonify({'error': 'Search query failed'}), 500
 
 @app.route('/carrier/<naic_code>')
 def carrier_details(naic_code):
-    """
-    Route to display detailed information for a single carrier.
-    """
     conn = get_db_connection()
     if not conn:
-        return redirect(url_for('index', error="Database connection failed."))
+        return redirect(url_for('index'))
 
-    carrier = None
     try:
         with conn, conn.cursor(dictionary=True) as cursor:
-            query = "SELECT * FROM carriers WHERE naic_code = %s"
-            cursor.execute(query, (naic_code,))
+            cursor.execute("SELECT * FROM carriers WHERE naic_code = %s LIMIT 1", (naic_code,))
             carrier = cursor.fetchone()
-            
+            return render_template('carrier_details.html', carrier=carrier, naic_code=naic_code)
     except Error as e:
         print(f"Detail Query Error: {e}")
-        carrier = None
+        return render_template('carrier_details.html', carrier=None, naic_code=naic_code)
+
+# --- New: Report Issue Routes ---
+
+@app.route('/report-issue', methods=['GET', 'POST'])
+def report_issue():
+    if request.method == 'POST':
+        # 1. Security: Honeypot Check (hidden field should be empty)
+        if request.form.get('website_check'):
+            # Silently fail for bots
+            return redirect(url_for('index'))
+
+        # 2. Security: Rate Limiting
+        user_ip = request.remote_addr
+        if is_rate_limited(user_ip):
+            flash("Too many requests. Please try again later.", "danger")
+            return redirect(url_for('index'))
+
+        # 3. Process Form
+        naic = request.form.get('naic_code')
+        name = request.form.get('carrier_name')
+        comments = request.form.get('comments')
+
+        if send_issue_email(naic, name, comments):
+            flash("Thank you! Your report has been sent to the admin.", "success")
+        else:
+            flash("There was an error sending your report. Please try again.", "danger")
         
-    return render_template('carrier_details.html', carrier=carrier, naic_code=naic_code)
+        # Return to the carrier details page
+        return redirect(url_for('carrier_details', naic_code=naic))
+
+    # GET Request: Render form with pre-filled data
+    naic = request.args.get('naic', '')
+    name = request.args.get('name', '')
+    return render_template('report_issue.html', naic=naic, name=name)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
