@@ -1,6 +1,12 @@
 {% extends 'base.html' %}
 
-{% block title %}{{ carrier.legal_name if carrier else 'Carrier Not Found' }} | Details{% endblock %}
+{% block title %}
+    {% if carrier %}
+        {{ carrier.legal_name }} NAIC Code {{ carrier.naic_code }} & Payer ID Lookup
+    {% else %}
+        Carrier Not Found
+    {% endif %}
+{% endblock %}
 
 {% block content %}
 <div class="container my-5">

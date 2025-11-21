@@ -112,6 +112,38 @@ def search_carriers():
         print(f"Query Error: {e}")
         return jsonify({'error': 'Search query failed'}), 500
 
+# In app.py, add this new route (e.g., before or after the search route)
+
+@app.route('/directory')
+def directory():
+    conn = get_db_connection()
+    if not conn:
+        return render_template('index.html'), 500
+
+    try:
+        with conn, conn.cursor(dictionary=True) as cursor:
+            # Fetch all carriers, ordered by state and then name
+            query = """
+                SELECT legal_name, naic_code, state_domicile 
+                FROM carriers 
+                ORDER BY state_domicile ASC, legal_name ASC
+            """
+            cursor.execute(query)
+            carriers = cursor.fetchall()
+
+            # Group carriers by state for the template
+            grouped_carriers = {}
+            for c in carriers:
+                state = c['state_domicile'] if c['state_domicile'] else 'Other'
+                if state not in grouped_carriers:
+                    grouped_carriers[state] = []
+                grouped_carriers[state].append(c)
+
+            return render_template('directory.html', grouped_carriers=grouped_carriers)
+    except Error as e:
+        print(f"Directory Query Error: {e}")
+        return redirect(url_for('index'))
+
 @app.route('/carrier/<naic_code>')
 def carrier_details(naic_code):
     conn = get_db_connection()
