@@ -1,0 +1,85 @@
+{% extends 'admin/base_admin.html' %}
+
+{% block admin_content %}
+<div class="row">
+    <!-- Role List -->
+    <div class="col-md-4">
+        <div class="card shadow-sm">
+            <div class="card-header bg-dark text-white">Roles</div>
+            <div class="list-group list-group-flush">
+                {% for role in roles %}
+                <a href="#" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center"
+                   onclick="showPerms({{ role.role_id }}, '{{ role.role_name }}')">
+                    {{ role.role_name }}
+                    {% if role.role_name == 'Admin' %}<span class="badge bg-danger">Locked</span>{% endif %}
+                </a>
+                {% endfor %}
+            </div>
+            <div class="card-body border-top">
+                <form method="POST">
+                    <input type="hidden" name="add_role" value="1">
+                    <div class="mb-2"><input type="text" name="role_name" class="form-control" placeholder="New Role Name" required></div>
+                    <div class="mb-2"><input type="text" name="description" class="form-control" placeholder="Description"></div>
+                    <button class="btn btn-sm btn-primary w-100">Create Role</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Permission Matrix -->
+    <div class="col-md-8">
+        <div class="card shadow-sm" id="perm-card" style="display:none;">
+            <div class="card-header fw-bold">Permissions for: <span id="selected-role-name" class="text-primary"></span></div>
+            <div class="card-body">
+                <form method="POST">
+                    <input type="hidden" name="update_perms" value="1">
+                    <input type="hidden" name="role_id" id="target-role-id">
+                    
+                    <div class="row">
+                        {% for perm in all_perms %}
+                        <div class="col-md-6 mb-3">
+                            <div class="form-check">
+                                <input class="form-check-input perm-cb" type="checkbox" 
+                                       name="permissions" value="{{ perm.permission_id }}" 
+                                       id="perm{{ perm.permission_id }}">
+                                <label class="form-check-label" for="perm{{ perm.permission_id }}">
+                                    <strong>{{ perm.page_name }}</strong><br>
+                                    <small class="text-muted">{{ perm.description }}</small>
+                                </label>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <button type="submit" class="btn btn-success mt-3">Save Permissions</button>
+                </form>
+            </div>
+        </div>
+        <div id="perm-placeholder" class="text-center text-muted py-5">
+            <i class="fa-solid fa-arrow-left me-2"></i> Select a role to manage permissions
+        </div>
+    </div>
+</div>
+
+<script>
+    // Map permissions from backend to JS
+    const rolePerms = {{ role_perms_map | tojson }};
+
+    function showPerms(roleId, roleName) {
+        document.getElementById('perm-placeholder').style.display = 'none';
+        document.getElementById('perm-card').style.display = 'block';
+        document.getElementById('selected-role-name').textContent = roleName;
+        document.getElementById('target-role-id').value = roleId;
+
+        // Reset checkboxes
+        document.querySelectorAll('.perm-cb').forEach(cb => cb.checked = false);
+
+        // Check valid ones
+        if (rolePerms[roleId]) {
+            rolePerms[roleId].forEach(permId => {
+                const cb = document.getElementById('perm' + permId);
+                if(cb) cb.checked = true;
+            });
+        }
+    }
+</script>
+{% endblock %}

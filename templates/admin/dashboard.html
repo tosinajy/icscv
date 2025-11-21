@@ -1,0 +1,124 @@
+{% extends 'admin/base_admin.html' %}
+
+{% block admin_content %}
+<!-- Explicitly load Chart.js here to fix ReferenceError -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<h2 class="mb-4">System Overview</h2>
+
+<div class="row g-4 mb-4">
+    <div class="col-md-4">
+        <div class="card bg-primary text-white h-100">
+            <div class="card-body">
+                <h5>Total Carriers</h5>
+                <h2 class="display-4 fw-bold">{{ total_carriers }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-8">
+        <div class="card h-100 shadow-sm">
+            <div class="card-header fw-bold">Edit Activity (Last 30 Days)</div>
+            <div class="card-body">
+                <canvas id="editChart" style="max-height: 200px;"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card shadow-sm">
+            <div class="card-header fw-bold bg-light">Data Quality Report</div>
+            <div class="card-body p-0">
+                <table class="table table-striped mb-0">
+                    <thead>
+                        <tr>
+                            <th>Field Name</th>
+                            <th>Missing Records</th>
+                            <th>% Incomplete</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in dq_report %}
+                        <tr>
+                            <td>{{ item.field }}</td>
+                            <td>{{ item.missing }}</td>
+                            <td>
+                                <div class="d-flex align-items-center">
+                                    <div class="progress flex-grow-1 me-2" style="height: 8px;">
+                                        <div class="progress-bar bg-{% if item.pct > 50 %}danger{% elif item.pct > 20 %}warning{% else %}success{% endif %}" 
+                                             style="width: {{ item.pct }}%"></div>
+                                    </div>
+                                    <span class="small">{{ item.pct }}%</span>
+                                </div>
+                            </td>
+                            <td>
+                                {% if item.pct > 50 %}
+                                    <span class="badge bg-danger">Critical</span>
+                                {% elif item.pct > 20 %}
+                                    <span class="badge bg-warning text-dark">Attention</span>
+                                {% else %}
+                                    <span class="badge bg-success">Good</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Store data in a safe JSON script block -->
+<script id="chart-data" type="application/json">
+    {{ edit_stats | tojson | safe }}
+</script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Defensive check to ensure library loaded
+        if (typeof Chart === 'undefined') {
+            console.error("Chart.js library not loaded");
+            return;
+        }
+
+        const ctx = document.getElementById('editChart').getContext('2d');
+        
+        // Retrieve and parse the data safely from the DOM
+        const rawDataElement = document.getElementById('chart-data');
+        let rawData = [];
+        try { rawData = JSON.parse(rawDataElement.textContent); } catch (e) {}
+
+        if (rawData && rawData.length > 0) {
+            const labels = rawData.map(item => item.status.toUpperCase());
+            const data = rawData.map(item => item.count);
+            const colors = rawData.map(item => item.status === 'approved' ? '#198754' : (item.status === 'rejected' ? '#dc3545' : '#ffc107'));
+    
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '# of Edits',
+                        data: data,
+                        backgroundColor: colors
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } }
+                }
+            });
+        } else {
+            new Chart(ctx, {
+                type: 'bar',
+                data: { labels: ['No Data'], datasets: [{ label: '# of Edits', data: [0], backgroundColor: ['#ccc'] }] },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+    });
+</script>
+{% endblock %}
