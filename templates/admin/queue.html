@@ -12,8 +12,8 @@
                     <th>Carrier</th>
                     <th>Field</th>
                     <th>Old Value</th>
-                    <th>Suggested Value</th>
-                    <th>Submitter</th>
+                    <th>New Value</th>
+                    <th>Submitted By</th>
                     <th class="text-end">Actions</th>
                 </tr>
             </thead>
@@ -21,37 +21,30 @@
                 {% for edit in edits %}
                 <tr>
                     <td class="small text-muted">{{ edit.submitted_at }}</td>
-                    <td>{{ edit.legal_name }}</td>
+                    <td><a href="{{ url_for('carrier_details', naic_code=edit.naic_code) }}" target="_blank">{{ edit.legal_name }}</a></td>
                     <td><span class="badge bg-secondary">{{ edit.field_name }}</span></td>
-                    <td class="text-muted small text-decoration-line-through">{{ edit.old_value }}</td>
+                    <td class="text-danger text-decoration-line-through small">{{ edit.old_value or 'Empty' }}</td>
                     <td class="text-success fw-bold">{{ edit.new_value }}</td>
                     <td>
-                        <div class="small fw-bold">{{ edit.submitter_name or 'Anon' }}</div>
+                        <div class="small fw-bold">{{ edit.submitter_name or 'Anonymous' }}</div>
                         <div class="small text-muted">{{ edit.submitter_email }}</div>
                     </td>
                     <td class="text-end">
-                        <a href="{{ url_for('approve_edit', edit_id=edit.edit_id, action='approve') }}" class="btn btn-success btn-sm"><i class="fa-solid fa-check"></i></a>
-                        <a href="{{ url_for('approve_edit', edit_id=edit.edit_id, action='reject') }}" class="btn btn-danger btn-sm"><i class="fa-solid fa-xmark"></i></a>
+                        <a href="{{ url_for('approve_edit', edit_id=edit.edit_id, action='approve') }}" class="btn btn-success btn-sm" onclick="return confirm('Apply this change to the live database?')">
+                            <i class="fa-solid fa-check"></i>
+                        </a>
+                        <a href="{{ url_for('approve_edit', edit_id=edit.edit_id, action='reject') }}" class="btn btn-danger btn-sm">
+                            <i class="fa-solid fa-xmark"></i>
+                        </a>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="7" class="text-center py-4">No pending edits.</td></tr>
+                <tr>
+                    <td colspan="7" class="text-center py-5 text-muted">No pending edits in queue. Good job!</td>
+                </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
 </div>
-
-<!-- Pagination -->
-<nav class="mt-4">
-    <ul class="pagination justify-content-center">
-        <li class="page-item {% if page == 1 %}disabled{% endif %}">
-            <a class="page-link" href="{{ url_for('admin_queue', page=page-1) }}">Previous</a>
-        </li>
-        <li class="page-item disabled"><span class="page-link">Page {{ page }} of {{ total_pages }}</span></li>
-        <li class="page-item {% if page == total_pages %}disabled{% endif %}">
-            <a class="page-link" href="{{ url_for('admin_queue', page=page+1) }}">Next</a>
-        </li>
-    </ul>
-</nav>
 {% endblock %}

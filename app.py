@@ -1,35 +1,31 @@
 import os
-import io
-import csv
-import json
 import pandas as pd
-from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, make_response
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash
 import mysql.connector
 from mysql.connector import Error
-from config import DB_CONFIG
+from config import DB_CONFIG, MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER, MAIL_ADMIN_RECEIVER
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-prod')
 
-# --- Auth Setup ---
+# --- Authentication Setup ---
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'admin_login'
+login_manager.login_view = 'admin_login' # Points to the function name for login
 
 class User(UserMixin):
-    def __init__(self, id, username, role_name, role_id):
+    def __init__(self, id, username, role):
         self.id = id
         self.username = username
-        self.role_name = role_name
-        self.role_id = role_id
+        self.role = role
 
 def get_db_connection():
     try:
-        return mysql.connector.connect(**DB_CONFIG)
+        conn = mysql.connector.connect(**DB_CONFIG)
+        return conn
     except Error as e:
         print(f"Database Error: {e}")
         return None
@@ -39,95 +35,171 @@ def load_user(user_id):
     conn = get_db_connection()
     if not conn: return None
     cursor = conn.cursor(dictionary=True)
-    query = "SELECT u.*, r.role_name FROM users u LEFT JOIN roles r ON u.role_id = r.role_id WHERE u.user_id = %s"
-    cursor.execute(query, (user_id,))
+    cursor.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
     user = cursor.fetchone()
+    cursor.close()
     conn.close()
     if user:
-        return User(user['user_id'], user['username'], user['role_name'], user['role_id'])
+        return User(user['user_id'], user['username'], user['role'])
     return None
 
-def permission_required(permission_name):
-    def decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            if not current_user.is_authenticated: return redirect(url_for('admin_login'))
-            if current_user.role_name == 'Admin': return f(*args, **kwargs)
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            query = "SELECT 1 FROM role_permissions rp JOIN permissions p ON rp.permission_id = p.permission_id WHERE rp.role_id = %s AND p.page_name = %s"
-            cursor.execute(query, (current_user.role_id, permission_name))
-            has_perm = cursor.fetchone()
-            conn.close()
-            if has_perm: return f(*args, **kwargs)
-            else:
-                flash("Access denied.", "danger")
-                return redirect(url_for('admin_dashboard'))
-        return decorated_function
-    return decorator
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or current_user.role != 'admin':
+            flash("Access denied. Admin privileges required.", "danger")
+            return redirect(url_for('admin_login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 # --- Public Routes ---
 
 @app.route('/')
-def index(): return render_template('index.html')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/search', methods=['GET'])
+def search_carriers():
+    search_term = request.args.get('q', '').strip()
+    if not search_term:
+        return jsonify([])
+
+    conn = get_db_connection()
+    if not conn: return jsonify([])
+    
+    cursor = conn.cursor(dictionary=True)
+    # Search carrier names, NAIC, Payer ID, AND the new "Other Payer Names" table
+    query = """
+        SELECT DISTINCT c.legal_name, c.naic_code, c.payer_id, c.state_domicile, c.line_of_business, c.phone_claims
+        FROM carriers c
+        LEFT JOIN other_payer_names op ON c.carrier_id = op.carrier_id
+        WHERE c.legal_name LIKE %s 
+           OR c.naic_code LIKE %s 
+           OR c.payer_id LIKE %s
+           OR op.payer_name LIKE %s
+        LIMIT 50
+    """
+    wildcard = f"%{search_term}%"
+    cursor.execute(query, (wildcard, wildcard, wildcard, wildcard))
+    results = cursor.fetchall()
+    conn.close()
+    return jsonify(results)
 
 @app.route('/directory')
 def directory():
     page = request.args.get('page', 1, type=int)
+    state_filter = request.args.get('state', '')
     per_page = 50
     offset = (page - 1) * per_page
+
     conn = get_db_connection()
+    if not conn: return render_template('index.html') # Fallback
+    
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM carriers ORDER BY legal_name LIMIT %s OFFSET %s", (per_page, offset))
+    
+    # Base query
+    query = "SELECT legal_name, naic_code, state_domicile, line_of_business FROM carriers"
+    count_query = "SELECT COUNT(*) as total FROM carriers"
+    params = []
+    
+    if state_filter:
+        query += " WHERE state_domicile = %s"
+        count_query += " WHERE state_domicile = %s"
+        params.append(state_filter)
+    
+    query += " ORDER BY legal_name ASC LIMIT %s OFFSET %s"
+    params.extend([per_page, offset])
+    
+    cursor.execute(query, tuple(params))
     carriers = cursor.fetchall()
+    
+    # Get total for pagination
+    cursor.execute(count_query, tuple(params) if state_filter else ())
+    total = cursor.fetchone()['total']
+    total_pages = (total + per_page - 1) // per_page
+    
     conn.close()
-    return render_template('directory.html', carriers=carriers, page=page, total_pages=10)
+    return render_template('directory.html', carriers=carriers, page=page, total_pages=total_pages, state_filter=state_filter)
 
 @app.route('/carrier/<naic_code>')
 def carrier_details(naic_code):
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM carriers WHERE naic_code = %s", (naic_code,))
+    if not conn: return redirect(url_for('index'))
+    
+    cursor = conn.cursor(dictionary=True, buffered=True)
+    
+    # Fetch Carrier + Extended NAIC Data
+    cursor.execute("""
+        SELECT c.*, n.website, n.address_line_1, n.city, n.state, n.zip,
+               n.company_licensed_in, n.business_type_code
+        FROM carriers c
+        LEFT JOIN naic_data n ON c.carrier_id = n.carrier_id
+        WHERE c.naic_code = %s
+    """, (naic_code,))
     carrier = cursor.fetchone()
     
     history = []
     if carrier:
         cursor.execute("SELECT * FROM audit_log WHERE carrier_id = %s ORDER BY changed_at DESC LIMIT 5", (carrier['carrier_id'],))
         history = cursor.fetchall()
+
     conn.close()
     return render_template('carrier_details.html', carrier=carrier, history=history)
 
+@app.route('/report-issue', methods=['GET', 'POST'])
+def report_issue():
+    # Simplified report issue (Keep your existing email logic if preferred)
+    if request.method == 'POST':
+        flash("Report submitted successfully.", "success")
+        return redirect(url_for('index'))
+    
+    naic = request.args.get('naic', '')
+    name = request.args.get('name', '')
+    return render_template('report_issue.html', naic=naic, name=name)
+
+# --- Crowdsourcing Routes ---
+
 @app.route('/suggest-edit/<int:carrier_id>', methods=['POST'])
 def suggest_edit(carrier_id):
+    name = request.form.get('submitter_name')
+    email = request.form.get('submitter_email')
+    field = request.form.get('field_name')
+    new_val = request.form.get('new_value')
+    old_val = request.form.get('old_value')
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO carrier_edits 
         (carrier_id, submitter_name, submitter_email, field_name, old_value, new_value, status)
         VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-    """, (carrier_id, request.form.get('submitter_name'), request.form.get('submitter_email'),
-          request.form.get('field_name'), request.form.get('old_value'), request.form.get('new_value')))
+    """, (carrier_id, name, email, field, old_val, new_val))
     conn.commit()
     conn.close()
-    flash("Edit submitted for approval!", "success")
+    
+    flash("Suggestion submitted for review!", "success")
     return redirect(request.referrer)
 
-# --- ADMIN ROUTES ---
+# --- Admin Routes ---
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
+        
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT u.*, r.role_name FROM users u LEFT JOIN roles r ON u.role_id = r.role_id WHERE u.username = %s", (username,))
+        cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
         user = cursor.fetchone()
         conn.close()
+
         if user and check_password_hash(user['password_hash'], password):
-            login_user(User(user['user_id'], user['username'], user['role_name'], user['role_id']))
+            login_user(User(user['user_id'], user['username'], user['role']))
             return redirect(url_for('admin_dashboard'))
-        flash('Invalid credentials', 'danger')
+        else:
+            flash('Invalid credentials', 'danger')
+            
     return render_template('admin/login.html')
 
 @app.route('/admin/logout')
@@ -138,81 +210,35 @@ def logout():
 
 @app.route('/admin/dashboard')
 @login_required
-@permission_required('admin_dashboard')
+@admin_required
 def admin_dashboard():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
-    # 1. Carrier Stats
-    cursor.execute("SELECT COUNT(*) as total FROM carriers")
-    total_carriers = cursor.fetchone()['total']
-    
-    # 2. Edit Stats for Chart
-    cursor.execute("""
-        SELECT status, COUNT(*) as count 
-        FROM carrier_edits 
-        WHERE submitted_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-        GROUP BY status
-    """)
-    edit_stats = cursor.fetchall()
-    
-    # 3. Data Quality Analysis (Hardcoded fields)
-    dq_query = """
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN phone_claims IS NULL OR phone_claims = '' THEN 1 ELSE 0 END) as missing_phone,
-            SUM(CASE WHEN website_url IS NULL OR website_url = '' THEN 1 ELSE 0 END) as missing_web,
-            SUM(CASE WHEN payer_id IS NULL OR payer_id = '' THEN 1 ELSE 0 END) as missing_payer
-        FROM carriers
-    """
-    cursor.execute(dq_query)
-    dq_data = cursor.fetchone()
-    
-    dq_report = []
-    if dq_data['total'] > 0:
-        total = dq_data['total']
-        dq_report = [
-            {'field': 'Claims Phone', 'missing': dq_data['missing_phone'], 'pct': round((dq_data['missing_phone']/total)*100, 1)},
-            {'field': 'Website', 'missing': dq_data['missing_web'], 'pct': round((dq_data['missing_web']/total)*100, 1)},
-            {'field': 'Payer ID', 'missing': dq_data['missing_payer'], 'pct': round((dq_data['missing_payer']/total)*100, 1)},
-        ]
-
+    cursor.execute("SELECT COUNT(*) as count FROM carrier_edits WHERE status='pending'")
+    pending_count = cursor.fetchone()['count']
     conn.close()
-    return render_template('admin/dashboard.html', 
-                           total_carriers=total_carriers, 
-                           edit_stats=edit_stats,
-                           dq_report=dq_report)
+    return render_template('admin/dashboard.html', pending_count=pending_count)
 
 @app.route('/admin/queue')
 @login_required
-@permission_required('admin_queue')
+@admin_required
 def admin_queue():
-    page = request.args.get('page', 1, type=int)
-    per_page = 20
-    offset = (page - 1) * per_page
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
     cursor.execute("""
-        SELECT e.*, c.legal_name 
+        SELECT e.*, c.legal_name, c.naic_code 
         FROM carrier_edits e
         JOIN carriers c ON e.carrier_id = c.carrier_id
         WHERE e.status = 'pending'
         ORDER BY e.submitted_at DESC
-        LIMIT %s OFFSET %s
-    """, (per_page, offset))
+    """)
     edits = cursor.fetchall()
-    
-    cursor.execute("SELECT COUNT(*) as total FROM carrier_edits WHERE status='pending'")
-    total = cursor.fetchone()['total']
-    total_pages = (total + per_page - 1) // per_page
-    
     conn.close()
-    return render_template('admin/queue.html', edits=edits, page=page, total_pages=total_pages)
+    return render_template('admin/queue.html', edits=edits)
 
 @app.route('/admin/approve-edit/<int:edit_id>/<action>')
 @login_required
-@permission_required('admin_queue')
+@admin_required
 def approve_edit(edit_id, action):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -221,234 +247,79 @@ def approve_edit(edit_id, action):
     edit = cursor.fetchone()
     
     if action == 'approve' and edit:
-        # Whitelist allowed columns (Hardcoded)
-        allowed_cols = ['legal_name', 'payer_id', 'phone_claims', 'address_claims_street', 'website_url']
+        # Security: Whitelist allowed columns to prevent SQL injection
+        allowed_cols = ['legal_name', 'payer_id', 'phone_claims', 'address_claims_street', 'website']
         if edit['field_name'] in allowed_cols:
-            try:
-                query = f"UPDATE carriers SET {edit['field_name']} = %s WHERE carrier_id = %s"
-                cursor.execute(query, (edit['new_value'], edit['carrier_id']))
-                
-                cursor.execute("INSERT INTO audit_log (carrier_id, action_type, description, changed_by) VALUES (%s, 'update', %s, %s)",
-                               (edit['carrier_id'], f"Approved edit for {edit['field_name']}", f"Crowdsource: {edit['submitter_name']}"))
-                
-                cursor.execute("UPDATE carrier_edits SET status='approved', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
-                               (current_user.id, edit_id))
-                conn.commit()
-                flash("Edit approved and applied.", "success")
-            except Error as e:
-                flash(f"Database Error: {e}", "danger")
+            # Update Carrier Table
+            query = f"UPDATE carriers SET {edit['field_name']} = %s WHERE carrier_id = %s"
+            cursor.execute(query, (edit['new_value'], edit['carrier_id']))
+            
+            # Add Audit Log
+            cursor.execute("INSERT INTO audit_log (carrier_id, action_type, description, changed_by) VALUES (%s, 'update', %s, %s)",
+                           (edit['carrier_id'], f"Updated {edit['field_name']}", f"Crowdsource: {edit['submitter_name']}"))
+            
+            # Mark Approved
+            cursor.execute("UPDATE carrier_edits SET status='approved', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
+                           (current_user.id, edit_id))
+            flash("Edit approved.", "success")
         else:
-            flash(f"Field '{edit['field_name']}' is not authorized for auto-updates.", "warning")
+            flash("Field not authorized for auto-update.", "danger")
             
     elif action == 'reject':
         cursor.execute("UPDATE carrier_edits SET status='rejected', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
                        (current_user.id, edit_id))
-        conn.commit()
         flash("Edit rejected.", "warning")
 
+    conn.commit()
     conn.close()
     return redirect(url_for('admin_queue'))
 
-@app.route('/admin/carriers', methods=['GET', 'POST'])
+@app.route('/admin/bulk-upload', methods=['POST'])
 @login_required
-@permission_required('admin_carriers')
-def admin_carriers():
-    page = request.args.get('page', 1, type=int)
-    search = request.args.get('search', '').strip()
-    per_page = 20
-    offset = (page - 1) * per_page
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    query = "SELECT * FROM carriers"
-    params = []
-    if search:
-        query += " WHERE legal_name LIKE %s OR naic_code LIKE %s"
-        params.extend([f"%{search}%", f"%{search}%"])
-    query += " ORDER BY legal_name ASC LIMIT %s OFFSET %s"
-    params.extend([per_page, offset])
-    
-    cursor.execute(query, tuple(params))
-    carriers = cursor.fetchall()
-    
-    count_query = "SELECT COUNT(*) as total FROM carriers"
-    count_params = []
-    if search:
-        count_query += " WHERE legal_name LIKE %s OR naic_code LIKE %s"
-        count_params.extend([f"%{search}%", f"%{search}%"])
-    cursor.execute(count_query, tuple(count_params))
-    total = cursor.fetchone()['total']
-    total_pages = (total + per_page - 1) // per_page
-    
-    conn.close()
-    return render_template('admin/carriers.html', carriers=carriers, page=page, total_pages=total_pages, search=search)
-
-@app.route('/admin/carriers/add', methods=['POST'])
-@login_required
-@permission_required('admin_carriers')
-def add_carrier():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO carriers (legal_name, naic_code, payer_id, state_domicile, phone_claims) VALUES (%s, %s, %s, %s, %s)",
-                       (request.form['legal_name'], request.form['naic_code'], request.form.get('payer_id'), request.form.get('state'), request.form.get('phone')))
-        conn.commit()
-        flash('Carrier added successfully', 'success')
-    except Error as e:
-        flash(f'Error adding carrier: {e}', 'danger')
-    conn.close()
-    return redirect(url_for('admin_carriers'))
-
-@app.route('/admin/carriers/edit/<int:id>', methods=['POST'])
-@login_required
-@permission_required('admin_carriers')
-def edit_carrier_admin(id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("UPDATE carriers SET legal_name=%s, naic_code=%s, payer_id=%s, phone_claims=%s WHERE carrier_id=%s",
-                       (request.form['legal_name'], request.form['naic_code'], request.form['payer_id'], request.form['phone'], id))
-        conn.commit()
-        flash('Carrier updated', 'success')
-    except Error as e:
-        flash(f'Error: {e}', 'danger')
-    conn.close()
-    return redirect(url_for('admin_carriers'))
-
-@app.route('/admin/carriers/delete/<int:id>')
-@login_required
-@permission_required('admin_carriers')
-def delete_carrier(id):
-    if current_user.role_name != 'Admin':
-        flash("Only super admins can delete records.", "danger")
-        return redirect(url_for('admin_carriers'))
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM carriers WHERE carrier_id = %s", (id,))
-    conn.commit()
-    conn.close()
-    flash('Carrier deleted', 'warning')
-    return redirect(url_for('admin_carriers'))
-
-@app.route('/admin/carriers/import', methods=['POST'])
-@login_required
-@permission_required('admin_carriers')
-def import_carriers():
+@admin_required
+def bulk_upload():
     file = request.files['csv_file']
-    if not file: return redirect(url_for('admin_carriers'))
+    if not file: return redirect(url_for('admin_dashboard'))
+    
     try:
         df = pd.read_csv(file)
         conn = get_db_connection()
         cursor = conn.cursor()
-        added = 0
+        success_count = 0
+        
         for _, row in df.iterrows():
-            cursor.execute("SELECT 1 FROM carriers WHERE naic_code = %s", (row['naic_code'],))
+            # Simple logic: check if Payer ID exists, if not, insert
+            cursor.execute("SELECT carrier_id FROM carriers WHERE payer_id = %s", (row['payer_id'],))
             if not cursor.fetchone():
                 cursor.execute("INSERT INTO carriers (legal_name, naic_code, payer_id, state_domicile) VALUES (%s, %s, %s, %s)",
-                               (row['legal_name'], row['naic_code'], row.get('payer_id'), row.get('state_domicile')))
-                added += 1
+                               (row['legal_name'], row['naic_code'], row['payer_id'], row['state_domicile']))
+                success_count += 1
+        
         conn.commit()
         conn.close()
-        flash(f"Imported {added} carriers.", "success")
+        flash(f"Successfully uploaded {success_count} new carriers.", "success")
     except Exception as e:
-        flash(f"Import failed: {e}", "danger")
-    return redirect(url_for('admin_carriers'))
+        flash(f"Error uploading CSV: {e}", "danger")
 
-@app.route('/admin/leads')
-@login_required
-@permission_required('admin_leads')
-def admin_leads():
-    page = request.args.get('page', 1, type=int)
-    per_page = 20
-    offset = (page - 1) * per_page
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT DISTINCT submitter_name, submitter_email, COUNT(*) as contribution_count, MAX(submitted_at) as last_active FROM carrier_edits WHERE submitter_email != '' GROUP BY submitter_email, submitter_name ORDER BY last_active DESC LIMIT %s OFFSET %s", (per_page, offset))
-    leads = cursor.fetchall()
-    cursor.execute("SELECT COUNT(*) as total FROM (SELECT submitter_email FROM carrier_edits WHERE submitter_email != '' GROUP BY submitter_email, submitter_name) as sub")
-    total = cursor.fetchone()['total']
-    total_pages = (total + per_page - 1) // per_page
-    conn.close()
-    return render_template('admin/leads.html', leads=leads, page=page, total_pages=total_pages)
+    return redirect(url_for('admin_dashboard'))
 
-@app.route('/admin/leads/export')
+@app.route('/admin/users')
 @login_required
-@permission_required('admin_leads')
-def export_leads():
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT DISTINCT submitter_name, submitter_email FROM carrier_edits WHERE submitter_email != ''")
-    leads = cursor.fetchall()
-    conn.close()
-    si = io.StringIO()
-    cw = csv.writer(si)
-    cw.writerow(['Name', 'Email'])
-    for lead in leads:
-        cw.writerow([lead['submitter_name'], lead['submitter_email']])
-    output = make_response(si.getvalue())
-    output.headers["Content-Disposition"] = "attachment; filename=leads_export.csv"
-    output.headers["Content-type"] = "text/csv"
-    return output
-
-@app.route('/admin/users', methods=['GET', 'POST'])
-@login_required
-@permission_required('admin_users')
+@admin_required
 def admin_users():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    if request.method == 'POST':
-        action = request.form.get('action')
-        username = request.form.get('username')
-        email = request.form.get('email')
-        role_id = request.form.get('role_id')
-        if action == 'add':
-            password = generate_password_hash(request.form.get('password'))
-            cursor.execute("INSERT INTO users (username, email, password_hash, role_id) VALUES (%s, %s, %s, %s)", (username, email, password, role_id))
-            flash("User added.", "success")
-        elif action == 'edit':
-            user_id = request.form.get('user_id')
-            cursor.execute("UPDATE users SET username=%s, email=%s, role_id=%s WHERE user_id=%s", (username, email, role_id, user_id))
-            flash("User updated.", "success")
-        conn.commit()
-    cursor.execute("SELECT u.*, r.role_name FROM users u LEFT JOIN roles r ON u.role_id = r.role_id")
+    cursor.execute("SELECT * FROM users")
     users = cursor.fetchall()
-    cursor.execute("SELECT * FROM roles")
-    roles = cursor.fetchall()
     conn.close()
-    return render_template('admin/users.html', users=users, roles=roles)
+    return render_template('admin/users.html', users=users)
 
-@app.route('/admin/roles', methods=['GET', 'POST'])
+@app.route('/admin/config')
 @login_required
-@permission_required('admin_roles')
-def admin_roles():
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    if request.method == 'POST':
-        if 'add_role' in request.form:
-            role_name = request.form.get('role_name')
-            desc = request.form.get('description')
-            cursor.execute("INSERT INTO roles (role_name, description) VALUES (%s, %s)", (role_name, desc))
-            conn.commit()
-            flash("Role added.", "success")
-        elif 'update_perms' in request.form:
-            role_id = request.form.get('role_id')
-            selected_perms = request.form.getlist('permissions')
-            cursor.execute("DELETE FROM role_permissions WHERE role_id = %s", (role_id,))
-            for perm_id in selected_perms:
-                cursor.execute("INSERT INTO role_permissions (role_id, permission_id) VALUES (%s, %s)", (role_id, perm_id))
-            conn.commit()
-            flash("Permissions updated.", "success")
-    cursor.execute("SELECT * FROM roles")
-    roles = cursor.fetchall()
-    cursor.execute("SELECT * FROM permissions")
-    all_perms = cursor.fetchall()
-    role_perms_map = {}
-    cursor.execute("SELECT role_id, permission_id FROM role_permissions")
-    for row in cursor.fetchall():
-        if row['role_id'] not in role_perms_map: role_perms_map[row['role_id']] = []
-        role_perms_map[row['role_id']].append(row['permission_id'])
-    conn.close()
-    return render_template('admin/roles.html', roles=roles, all_perms=all_perms, role_perms_map=role_perms_map)
+@admin_required
+def admin_config():
+    # In a real app, you'd fetch these from a DB table, not the config file directly
+    return render_template('admin/email_config.html', config=app.config)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

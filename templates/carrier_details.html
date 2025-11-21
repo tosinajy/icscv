@@ -1,9 +1,30 @@
 {% extends 'base.html' %}
 
 {% block title %}{{ carrier.legal_name }} NAIC {{ carrier.naic_code }} | CarrierCodeVerify{% endblock %}
+{% block meta_description %}Contact details, claims address, and Payer ID for {{ carrier.legal_name }}. NAIC: {{ carrier.naic_code }}. Update claims phone and eligibility information.{% endblock %}
+
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "InsuranceAgency",
+  "name": "{{ carrier.legal_name }}",
+  "identifier": "{{ carrier.naic_code }}",
+  "address": {
+    "@type": "PostalAddress",
+    "streetAddress": "{{ carrier.address_claims_street }}",
+    "addressLocality": "{{ carrier.address_claims_city }}",
+    "addressRegion": "{{ carrier.address_claims_state }}",
+    "postalCode": "{{ carrier.address_claims_zip }}"
+  },
+  "telephone": "{{ carrier.phone_claims }}"
+}
+</script>
+{% endblock %}
 
 {% block content %}
 <div class="container my-5">
+    
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, message in messages %}
@@ -15,84 +36,145 @@
       {% endif %}
     {% endwith %}
 
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
+    <div class="row mb-4">
+        <div class="col-md-8">
             <h1 class="fw-bold mb-0">{{ carrier.legal_name }}</h1>
-            <span class="badge bg-primary">{{ carrier.state_domicile }}</span>
+            <div class="text-muted small mb-2">Last Updated: {{ carrier.last_updated or 'Unknown' }}</div>
+            <div>
+                <span class="badge bg-primary">{{ carrier.state_domicile }} Domicile</span>
+                <span class="badge bg-info text-dark">{{ carrier.line_of_business or 'General' }}</span>
+                {% if carrier.am_best_rating %}
+                    <span class="badge bg-dark">AM Best: {{ carrier.am_best_rating }}</span>
+                {% endif %}
+            </div>
         </div>
-        <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editModal">
-            <i class="fa-solid fa-pen-to-square me-2"></i>Suggest Edit
-        </button>
+        <div class="col-md-4 text-md-end mt-3 mt-md-0">
+            <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#editModal" data-field="general" data-val="N/A">
+                <i class="fa-solid fa-pen-to-square me-2"></i>Suggest Edit
+            </button>
+            <a href="{{ url_for('report_issue', naic=carrier.naic_code, name=carrier.legal_name) }}" class="btn btn-outline-danger btn-sm ms-2">
+                <i class="fa-regular fa-flag"></i>
+            </a>
+        </div>
     </div>
 
-    <!-- Details Cards -->
     <div class="row g-4">
-        <!-- Identifiers -->
         <div class="col-lg-4">
-            <div class="card h-100 shadow-sm">
-                <div class="card-header bg-light fw-bold">Identifiers</div>
+            <div class="card detail-card h-100">
+                <div class="card-header-custom"><i class="fa-solid fa-fingerprint me-2"></i>Identifiers</div>
                 <ul class="list-group list-group-flush">
                     <li class="list-group-item d-flex justify-content-between">
-                        <span class="text-muted">NAIC</span>
-                        <span class="fw-bold">{{ carrier.naic_code }}</span>
+                        <span class="text-muted">NAIC Code</span>
+                        <span class="fw-bold">{{ carrier.naic_code }} <i class="fa-regular fa-copy text-primary ms-2 cursor-pointer" onclick="copyToClipboard('{{ carrier.naic_code }}')"></i></span>
                     </li>
                     <li class="list-group-item d-flex justify-content-between">
                         <span class="text-muted">Payer ID</span>
-                        <span class="fw-bold">{{ carrier.payer_id or 'N/A' }}</span>
+                        <span class="fw-bold">{{ carrier.payer_id or '--' }}</span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between">
+                        <span class="text-muted">Enrollment</span>
+                        <span>
+                            {% if carrier.enrollment %}<i class="fa-solid fa-check-circle text-success"></i> Required{% else %}<span class="text-muted">No</span>{% endif %}
+                        </span>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between">
+                        <span class="text-muted">WC Auto</span>
+                        <span>
+                            {% if carrier.wc_auto %}<i class="fa-solid fa-check-circle text-success"></i> Yes{% else %}<span class="text-muted">No</span>{% endif %}
+                        </span>
                     </li>
                 </ul>
             </div>
         </div>
-        <!-- Contact -->
+
         <div class="col-lg-4">
-            <div class="card h-100 shadow-sm">
-                <div class="card-header bg-light fw-bold">Contact</div>
+            <div class="card detail-card h-100">
+                <div class="card-header-custom"><i class="fa-solid fa-headset me-2"></i>Contact</div>
                 <ul class="list-group list-group-flush">
                     <li class="list-group-item">
-                        <small class="text-muted d-block">Claims Phone</small>
-                        <span class="fw-bold">{{ carrier.phone_claims or 'N/A' }}</span>
+                        <div class="small text-muted text-uppercase">Claims Phone</div>
+                        <div class="fs-5 text-dark">{{ carrier.phone_claims or '--' }}</div>
                     </li>
                     <li class="list-group-item">
-                        <small class="text-muted d-block">Website</small>
-                        <a href="{{ carrier.website_url }}" target="_blank">{{ carrier.website_url or 'N/A' }}</a>
+                        <div class="small text-muted text-uppercase">Eligibility / Prior Auth</div>
+                        <div>Elig: {{ carrier.phone_eligibility or '--' }}</div>
+                        <div>Auth: {{ carrier.phone_prior_auth or '--' }}</div>
+                    </li>
+                    <li class="list-group-item">
+                        <div class="small text-muted text-uppercase">Website</div>
+                        {% if carrier.website %}
+                            <a href="{{ carrier.website }}" target="_blank" rel="nofollow">{{ carrier.website }}</a>
+                        {% else %}
+                            <span class="text-muted">--</span>
+                        {% endif %}
                     </li>
                 </ul>
             </div>
         </div>
-        <!-- Address -->
+
         <div class="col-lg-4">
-            <div class="card h-100 shadow-sm">
-                <div class="card-header bg-light fw-bold">Address</div>
+            <div class="card detail-card h-100">
+                <div class="card-header-custom"><i class="fa-solid fa-location-dot me-2"></i>Address</div>
                 <div class="card-body">
+                    <h6 class="fw-bold text-secondary">Claims Address</h6>
                     {% if carrier.address_claims_street %}
-                        {{ carrier.address_claims_street }}<br>
-                        {{ carrier.address_claims_city }}, {{ carrier.address_claims_state }} {{ carrier.address_claims_zip }}
+                        <address class="mb-3">
+                            {{ carrier.address_claims_street }}<br>
+                            {{ carrier.address_claims_city }}, {{ carrier.address_claims_state }} {{ carrier.address_claims_zip }}
+                        </address>
                     {% else %}
-                        <span class="text-muted">No address on file.</span>
+                        <p class="text-muted small">No specific claims address on file.</p>
+                    {% endif %}
+
+                    {% if carrier.address_line_1 %}
+                    <hr>
+                    <h6 class="fw-bold text-secondary">Corporate Address</h6>
+                    <address class="mb-0 small text-muted">
+                        {{ carrier.address_line_1 }}<br>
+                        {{ carrier.city }}, {{ carrier.state }} {{ carrier.zip }}
+                    </address>
                     {% endif %}
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Audit History -->
-    {% if history %}
-    <div class="mt-4">
-        <h5>Recent Updates</h5>
-        <ul class="list-group">
-            {% for log in history %}
-            <li class="list-group-item small">
-                <span class="fw-bold">{{ log.description }}</span>
-                <span class="text-muted ms-2">- {{ log.changed_at }} ({{ log.changed_by }})</span>
-            </li>
-            {% endfor %}
-        </ul>
+    <div class="card mt-4 shadow-sm border-0">
+        <div class="card-header bg-light">
+            <ul class="nav nav-tabs card-header-tabs" id="myTab" role="tablist">
+                <li class="nav-item">
+                    <button class="nav-link active" id="history-tab" data-bs-toggle="tab" data-bs-target="#history" type="button">Audit History</button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" id="tech-tab" data-bs-toggle="tab" data-bs-target="#tech" type="button">Technical Data</button>
+                </li>
+            </ul>
+        </div>
+        <div class="card-body tab-content">
+            <div class="tab-pane fade show active" id="history">
+                <div class="list-group list-group-flush">
+                    {% for log in history %}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">{{ log.description }}</h6>
+                            <small class="text-muted">{{ log.changed_at }}</small>
+                        </div>
+                        <small class="text-primary">By {{ log.changed_by }}</small>
+                    </div>
+                    {% else %}
+                    <p class="text-muted m-3">No recent updates recorded.</p>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="tab-pane fade" id="tech">
+                <p class="mb-1"><strong>Transaction Config:</strong> {{ carrier.transaction or 'Standard' }}</p>
+                <p class="mb-1"><strong>Licensed In:</strong> {{ carrier.company_licensed_in or 'N/A' }}</p>
+                <p class="mb-1"><strong>Business Type:</strong> {{ carrier.business_type_code or 'N/A' }}</p>
+            </div>
+        </div>
     </div>
-    {% endif %}
-
 </div>
 
-<!-- Edit Modal -->
 <div class="modal fade" id="editModal" tabindex="-1">
     <div class="modal-dialog">
         <form action="{{ url_for('suggest_edit', carrier_id=carrier.carrier_id) }}" method="POST">
@@ -106,7 +188,6 @@
                         Help us maintain accuracy. Admin will review your changes.
                     </div>
                     
-                    <!-- Lead Gen / Author Info -->
                     <div class="row g-2 mb-3">
                         <div class="col-md-6">
                             <label class="form-label small fw-bold">Your Name</label>
@@ -125,7 +206,8 @@
                             <option value="phone_claims">Claims Phone</option>
                             <option value="address_claims_street">Claims Address</option>
                             <option value="payer_id">Payer ID</option>
-                            <option value="website_url">Website</option>
+                            <option value="website">Website</option>
+                            <option value="other">Other</option>
                         </select>
                     </div>
 
@@ -144,4 +226,18 @@
         </form>
     </div>
 </div>
+
+<script>
+    // Simple script to pre-fill old value if specific edit button clicked
+    const editModal = document.getElementById('editModal')
+    editModal.addEventListener('show.bs.modal', event => {
+        const button = event.relatedTarget
+        const field = button.getAttribute('data-field')
+        const val = button.getAttribute('data-val')
+        if(field !== 'general') {
+            document.getElementById('field-selector').value = field;
+            document.getElementById('modal-old-val').value = val;
+        }
+    })
+</script>
 {% endblock %}
