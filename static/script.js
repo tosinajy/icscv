@@ -5,30 +5,44 @@ document.addEventListener('DOMContentLoaded', function() {
     const resultsTable = document.getElementById('results-table');
     const resultsBody = document.getElementById('results-body');
     const statusMessage = document.getElementById('status-message');
+    const autocompleteList = document.getElementById('autocomplete-list');
     
+    let debounceTimer;
+
     // --- Core Functions ---
 
     function copyToClipboard(text) {
         if (!text || text === 'null' || text === 'undefined') return;
         
+        // Modern Clipboard API
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text.trim()).then(() => {
+                showToast('Copied to clipboard!');
+            }).catch(err => {
+                console.error('Clipboard API failed: ', err);
+                fallbackCopy(text);
+            });
+        } else {
+            fallbackCopy(text);
+        }
+    }
+
+    function fallbackCopy(text) {
         const tempInput = document.createElement('input');
         tempInput.value = text.trim();
         document.body.appendChild(tempInput);
         tempInput.select();
         document.execCommand('copy');
         document.body.removeChild(tempInput);
-
         showToast('Copied to clipboard!');
     }
     
-    // Expose to window for inline HTML onclicks
     window.copyToClipboard = copyToClipboard;
 
     function showToast(message) {
-        // Simple toast implementation
         let toast = document.createElement('div');
         toast.className = 'position-fixed bottom-0 end-0 p-3';
-        toast.style.zIndex = '11';
+        toast.style.zIndex = '1050';
         toast.innerHTML = `
             <div class="toast show align-items-center text-white bg-success border-0" role="alert">
                 <div class="d-flex">
@@ -43,31 +57,82 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(() => { toast.remove(); }, 3000);
     }
 
+    // --- Autocomplete Functions ---
+
+    if (searchInput && autocompleteList) {
+        searchInput.addEventListener('input', function(e) {
+            clearTimeout(debounceTimer);
+            const val = this.value;
+            
+            if (!val || val.length < 2) {
+                closeAllLists();
+                return;
+            }
+
+            debounceTimer = setTimeout(() => {
+                fetch(`/api/autocomplete?q=${encodeURIComponent(val)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        closeAllLists();
+                        if (data.length > 0) {
+                            autocompleteList.style.display = 'block';
+                            data.forEach(item => {
+                                const div = document.createElement('div');
+                                div.className = 'autocomplete-item';
+                                // Highlight logic could go here
+                                div.innerHTML = `
+                                    <span>${item.label}</span>
+                                    <span class="badge bg-light text-secondary border float-end small">${item.category}</span>
+                                `;
+                                div.addEventListener('click', function() {
+                                    searchInput.value = item.label;
+                                    closeAllLists();
+                                    performSearch();
+                                });
+                                autocompleteList.appendChild(div);
+                            });
+                        }
+                    });
+            }, 300);
+        });
+
+        // Close list on click outside
+        document.addEventListener('click', function(e) {
+            if (e.target !== searchInput) {
+                closeAllLists();
+            }
+        });
+    }
+
+    function closeAllLists() {
+        if (autocompleteList) {
+            autocompleteList.innerHTML = '';
+            autocompleteList.style.display = 'none';
+        }
+    }
+
+    // --- Search Functions ---
+
     function performSearch() {
         const query = searchInput.value.trim();
-
         if (!query) {
             alert("Please enter a search term.");
             return;
         }
 
-        // 1. Feedback: Show the results container (previously hidden)
         resultsContainer.style.display = 'block';
-        
-        // 2. Feedback: Show loading state
         statusMessage.innerHTML = `
             <div class="spinner-border text-primary mb-3" role="status"></div>
             <p class="lead text-muted">Searching database for "<strong>${query}</strong>"...</p>
         `;
         statusMessage.style.display = 'block';
         resultsTable.style.display = 'none';
+        closeAllLists(); // Close dropdown if open
 
-        // 3. Fetch Data
         fetch(`/api/search?q=${encodeURIComponent(query)}`)
             .then(response => response.json())
             .then(data => {
                 resultsBody.innerHTML = ''; 
-
                 if (data.length === 0) {
                     statusMessage.innerHTML = `<div class="text-danger"><i class="fa-regular fa-face-frown fa-2x mb-2"></i><p>No carriers found matching "${query}".</p></div>`;
                 } else {
@@ -76,20 +141,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
                     data.forEach(carrier => {
                         const row = document.createElement('tr');
-                        
                         const name = carrier.legal_name || 'N/A';
                         const state = carrier.state_domicile ? `<span class="badge bg-light text-dark border ms-2">${carrier.state_domicile}</span>` : '';
                         const naic = carrier.naic_code || 'N/A';
                         const payer = carrier.payer_id || 'N/A';
-                        const lob = carrier.line_of_business || '<span class="text-muted">-</span>';
-                        const claimsPhone = carrier.phone_claims || 'N/A';
-
-                        // Action Button (View Details)
                         const detailsBtn = naic !== 'N/A' ? 
                             `<a href="/carrier/${naic}" class="btn btn-sm btn-primary rounded-pill px-3">Details <i class="fa-solid fa-arrow-right ms-1"></i></a>` : 
                             '<span class="text-muted">-</span>';
 
-                        // Helper for copyable cells
                         const createCopyCell = (val) => {
                             if(val === 'N/A') return `<span class="text-muted">N/A</span>`;
                             return `
@@ -104,14 +163,10 @@ document.addEventListener('DOMContentLoaded', function() {
                             <td class="ps-4 fw-bold text-primary">${name} ${state}</td>
                             <td>${createCopyCell(naic)}</td>
                             <td>${createCopyCell(payer)}</td>
-                            <td>${lob}</td>
-                            <td>${claimsPhone}</td>
-                            <td class="pe-4">${detailsBtn}</td>
+                            <td class="pe-4 text-end">${detailsBtn}</td>
                         `;
                         resultsBody.appendChild(row);
                     });
-                    
-                    // Scroll to results
                     resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }
             })
@@ -121,7 +176,6 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
-    // --- Event Listeners ---
     if(searchButton) {
         searchButton.addEventListener('click', performSearch);
         searchInput.addEventListener('keypress', function(e) {

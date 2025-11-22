@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
@@ -14,7 +15,7 @@ app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-prod')
 # --- Authentication Setup ---
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'admin_login' # Points to the function name for login
+login_manager.login_view = 'admin_login' 
 
 class User(UserMixin):
     def __init__(self, id, username, role):
@@ -52,35 +53,91 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+# --- Helper: Fetch Full Carrier Data ---
+def get_full_carrier_data(carrier_id):
+    conn = get_db_connection()
+    if not conn: return None
+    cursor = conn.cursor(dictionary=True)
+    
+    query_core = """
+        SELECT 
+            c.carrier_id, c.legal_name, c.state_domicile, c.am_best_rating, c.update_dt, 
+            c.other_carrier_names, c.company_type, c.sbs_company_number, c.sbs_legacy_number,
+            n.cocode, n.company_licensed_in, n.company_name, n.full_company_name, n.short_name, n.business_type_code, n.insurance_types,
+            p.payer_code, p.enrollment, p.attachment, p.transaction, p.wc_auto, p.available, p.non_par, p.other_payer_names
+        FROM carriers c
+        LEFT JOIN naic n ON c.naic_id = n.naic_id
+        LEFT JOIN payers p ON c.payer_id = p.payer_id
+        WHERE c.carrier_id = %s
+    """
+    cursor.execute(query_core, (carrier_id,))
+    carrier = cursor.fetchone()
+    
+    if carrier:
+        # Normalize BITs
+        for key in ['enrollment', 'attachment', 'wc_auto', 'available', 'non_par']:
+            val = carrier.get(key)
+            if isinstance(val, bytes):
+                carrier[key] = int.from_bytes(val, byteorder='big')
+            elif val is None:
+                carrier[key] = 0
+
+        # Fetch Lists
+        tables = ['phones', 'emails', 'websites', 'addresses', 'line_of_business']
+        for t in tables:
+            cursor.execute(f"SELECT * FROM {t} WHERE carrier_id = %s", (carrier_id,))
+            carrier[t] = cursor.fetchall()
+            
+    conn.close()
+    return carrier
+
 # --- Public Routes ---
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/api/search', methods=['GET'])
-def search_carriers():
+@app.route('/api/autocomplete', methods=['GET'])
+def autocomplete():
     search_term = request.args.get('q', '').strip()
-    if not search_term:
+    if not search_term or len(search_term) < 2:
         return jsonify([])
 
     conn = get_db_connection()
     if not conn: return jsonify([])
     
     cursor = conn.cursor(dictionary=True)
-    # Search carrier names, NAIC, Payer ID, AND the new "Other Payer Names" table
+    wildcard = f"%{search_term}%"
+    suggestions = []
+    try:
+        cursor.execute("SELECT legal_name as label, 'Carrier' as category FROM carriers WHERE legal_name LIKE %s LIMIT 5", (wildcard,))
+        suggestions.extend(cursor.fetchall())
+        cursor.execute("SELECT cocode as label, 'NAIC' as category FROM naic WHERE cocode LIKE %s LIMIT 3", (wildcard,))
+        suggestions.extend(cursor.fetchall())
+        cursor.execute("SELECT payer_code as label, 'Payer ID' as category FROM payers WHERE payer_code LIKE %s LIMIT 3", (wildcard,))
+        suggestions.extend(cursor.fetchall())
+    except Exception as e:
+        print(f"Autocomplete Error: {e}")
+    finally:
+        conn.close()
+    return jsonify(suggestions)
+
+@app.route('/api/search', methods=['GET'])
+def search_carriers():
+    search_term = request.args.get('q', '').strip()
+    if not search_term: return jsonify([])
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
     query = """
-        SELECT DISTINCT c.legal_name, c.naic_code, c.payer_id, c.state_domicile, c.line_of_business, c.phone_claims
+        SELECT DISTINCT c.legal_name, c.state_domicile, n.cocode as naic_code, p.payer_code as payer_id
         FROM carriers c
-        LEFT JOIN other_payer_names op ON c.carrier_id = op.carrier_id
-        WHERE c.legal_name LIKE %s 
-           OR c.naic_code LIKE %s 
-           OR c.payer_id LIKE %s
-           OR op.payer_name LIKE %s
+        LEFT JOIN naic n ON c.naic_id = n.naic_id
+        LEFT JOIN payers p ON c.payer_id = p.payer_id
+        WHERE c.legal_name LIKE %s OR n.cocode LIKE %s OR p.payer_code LIKE %s
         LIMIT 50
     """
     wildcard = f"%{search_term}%"
-    cursor.execute(query, (wildcard, wildcard, wildcard, wildcard))
+    cursor.execute(query, (wildcard, wildcard, wildcard))
     results = cursor.fetchall()
     conn.close()
     return jsonify(results)
@@ -88,97 +145,204 @@ def search_carriers():
 @app.route('/directory')
 def directory():
     page = request.args.get('page', 1, type=int)
-    state_filter = request.args.get('state', '')
+    search_query = request.args.get('search', '').strip()
     per_page = 50
     offset = (page - 1) * per_page
-
     conn = get_db_connection()
-    if not conn: return render_template('index.html') # Fallback
-    
     cursor = conn.cursor(dictionary=True)
-    
-    # Base query
-    query = "SELECT legal_name, naic_code, state_domicile, line_of_business FROM carriers"
-    count_query = "SELECT COUNT(*) as total FROM carriers"
+    query = """
+        SELECT c.legal_name, n.cocode as naic_code, p.payer_code, p.transaction, CAST(p.wc_auto AS UNSIGNED) as wc_auto,
+            GROUP_CONCAT(DISTINCT ch.clearing_house SEPARATOR ', ') as clearing_houses
+        FROM carriers c
+        LEFT JOIN naic n ON c.naic_id = n.naic_id
+        LEFT JOIN payers p ON c.payer_id = p.payer_id
+        LEFT JOIN clearing_houses ch ON p.payer_id = ch.payer_id
+    """
+    count_query = "SELECT COUNT(DISTINCT c.carrier_id) as total FROM carriers c LEFT JOIN naic n ON c.naic_id = n.naic_id LEFT JOIN payers p ON c.payer_id = p.payer_id"
     params = []
-    
-    if state_filter:
-        query += " WHERE state_domicile = %s"
-        count_query += " WHERE state_domicile = %s"
-        params.append(state_filter)
-    
-    query += " ORDER BY legal_name ASC LIMIT %s OFFSET %s"
+    if search_query:
+        where_clause = " WHERE c.legal_name LIKE %s OR n.cocode LIKE %s OR p.payer_code LIKE %s"
+        query += where_clause
+        count_query += where_clause
+        wildcard = f"%{search_query}%"
+        params.extend([wildcard, wildcard, wildcard])
+    query += " GROUP BY c.carrier_id ORDER BY c.legal_name ASC LIMIT %s OFFSET %s"
     params.extend([per_page, offset])
-    
     cursor.execute(query, tuple(params))
     carriers = cursor.fetchall()
-    
-    # Get total for pagination
-    cursor.execute(count_query, tuple(params) if state_filter else ())
-    total = cursor.fetchone()['total']
+    cursor.execute(count_query, tuple(params[:3]) if search_query else ())
+    total_res = cursor.fetchone()
+    total = total_res['total'] if total_res else 0
     total_pages = (total + per_page - 1) // per_page
-    
     conn.close()
-    return render_template('directory.html', carriers=carriers, page=page, total_pages=total_pages, state_filter=state_filter)
+    return render_template('directory.html', carriers=carriers, page=page, total_pages=total_pages, search=search_query)
 
 @app.route('/carrier/<naic_code>')
 def carrier_details(naic_code):
     conn = get_db_connection()
-    if not conn: return redirect(url_for('index'))
-    
-    cursor = conn.cursor(dictionary=True, buffered=True)
-    
-    # Fetch Carrier + Extended NAIC Data
-    cursor.execute("""
-        SELECT c.*, n.website, n.address_line_1, n.city, n.state, n.zip,
-               n.company_licensed_in, n.business_type_code
-        FROM carriers c
-        LEFT JOIN naic_data n ON c.carrier_id = n.carrier_id
-        WHERE c.naic_code = %s
-    """, (naic_code,))
-    carrier = cursor.fetchone()
-    
-    history = []
-    if carrier:
-        cursor.execute("SELECT * FROM audit_log WHERE carrier_id = %s ORDER BY changed_at DESC LIMIT 5", (carrier['carrier_id'],))
-        history = cursor.fetchall()
-
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT carrier_id FROM naic WHERE cocode = %s", (naic_code,))
+    res = cursor.fetchone()
     conn.close()
-    return render_template('carrier_details.html', carrier=carrier, history=history)
-
-@app.route('/report-issue', methods=['GET', 'POST'])
-def report_issue():
-    # Simplified report issue (Keep your existing email logic if preferred)
-    if request.method == 'POST':
-        flash("Report submitted successfully.", "success")
+    
+    if not res:
+        flash("Carrier not found", "danger")
         return redirect(url_for('index'))
     
-    naic = request.args.get('naic', '')
-    name = request.args.get('name', '')
-    return render_template('report_issue.html', naic=naic, name=name)
-
-# --- Crowdsourcing Routes ---
-
-@app.route('/suggest-edit/<int:carrier_id>', methods=['POST'])
-def suggest_edit(carrier_id):
-    name = request.form.get('submitter_name')
-    email = request.form.get('submitter_email')
-    field = request.form.get('field_name')
-    new_val = request.form.get('new_value')
-    old_val = request.form.get('old_value')
+    carrier = get_full_carrier_data(res['carrier_id'])
     
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM audit_log WHERE carrier_id = %s ORDER BY changed_at DESC LIMIT 10", (res['carrier_id'],))
+    history = cursor.fetchall()
+    conn.close()
+    
+    return render_template('carrier_details.html', carrier=carrier, history=history)
+
+@app.route('/suggest-edit/<int:carrier_id>', methods=['GET', 'POST'])
+def suggest_edit_form(carrier_id):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    # Fetch current state for both GET and to capture 'old_value' on POST
+    current_carrier_data = get_full_carrier_data(carrier_id)
+    if not current_carrier_data:
+        flash("Carrier not found.", "danger")
+        conn.close()
+        return redirect(url_for('index'))
+
+    if request.method == 'GET':
+        # Fetch Lookups for Dropdowns
+        lookups = {}
+        cursor.execute("SELECT phone_type FROM phone_types ORDER BY phone_type")
+        lookups['phone_types'] = cursor.fetchall()
+        cursor.execute("SELECT state_id FROM us_states ORDER BY state_id")
+        lookups['states'] = cursor.fetchall()
+        cursor.execute("SELECT email_type FROM email_types ORDER BY email_type")
+        lookups['email_types'] = cursor.fetchall()
+        cursor.execute("SELECT website_type FROM website_types ORDER BY website_type")
+        lookups['website_types'] = cursor.fetchall()
+        cursor.execute("SELECT company_type FROM company_types ORDER BY company_type")
+        lookups['company_types'] = cursor.fetchall()
+        cursor.execute("SELECT address_type FROM address_types ORDER BY address_type")
+        lookups['address_types'] = cursor.fetchall()
+        
+        conn.close()
+        return render_template('suggest_edit.html', carrier=current_carrier_data, lookups=lookups)
+    
+    # POST Handling
+    # Capture Old State as JSON
+    
+    # Helper to serialize old data
+    def serialize_for_json(obj):
+        if isinstance(obj, (pd.Timestamp, pd.Timedelta)):
+            return str(obj)
+        if isinstance(obj, bytes):
+            return 1 if obj == b'\x01' else 0 # simplify for comparison
+        return obj
+
+    # We need a clean dictionary of the old data to compare against
+    # Simple approach: Use the keys we care about from get_full_carrier_data
+    # Note: `current_carrier_data` has date objects that need string conversion for JSON
+    old_json_ready = {}
+    for k, v in current_carrier_data.items():
+        if k in ['phones', 'emails', 'websites', 'addresses', 'line_of_business']:
+            # Handle lists
+            old_list = []
+            for item in v:
+                # Flatten dict items
+                flat_item = {ik: serialize_for_json(iv) for ik, iv in item.items()}
+                old_list.append(flat_item)
+            old_json_ready[k] = old_list
+        else:
+            old_json_ready[k] = serialize_for_json(v)
+    
+    old_value_json = json.dumps(old_json_ready, default=str)
+
+    # Clean Data Construction (New Value)
+    clean_data = {
+        'submitter_name': request.form.get('submitter_name'),
+        'submitter_email': request.form.get('submitter_email'),
+        'legal_name': request.form.get('legal_name'),
+        'am_best_rating': request.form.get('am_best_rating'),
+        'state_domicile': request.form.get('state_domicile'),
+        
+        # NAIC Section
+        'cocode': request.form.get('cocode'),
+        'company_name': request.form.get('company_name'),
+        'short_name': request.form.get('short_name'),
+        'company_licensed_in': request.form.get('company_licensed_in'),
+        'insurance_types': request.form.get('insurance_types'),
+        
+        # Payer Section
+        'payer_code': request.form.get('payer_code'),
+        'enrollment': 1 if request.form.get('enrollment') else 0,
+        'attachment': 1 if request.form.get('attachment') else 0,
+        'wc_auto': 1 if request.form.get('wc_auto') else 0,
+        'available': 1 if request.form.get('available') else 0,
+        'non_par': 1 if request.form.get('non_par') else 0,
+        'transaction': request.form.get('transaction'),
+        'other_payer_names': request.form.get('other_payer_names'),
+
+        'company_type': request.form.get('company_type'),
+        'sbs_company_number': request.form.get('sbs_company_number'),
+        'sbs_legacy_number': request.form.get('sbs_legacy_number'),
+        'other_carrier_names': request.form.get('other_carrier_names'),
+        
+        'phones': [],
+        'emails': [],
+        'websites': [],
+        'addresses': [],
+        'lobs': []
+    }
+    
+    # Process Lists
+    p_types = request.form.getlist('phone_type[]')
+    p_nums = request.form.getlist('phone_number[]')
+    for i in range(len(p_nums)):
+        if p_nums[i]: clean_data['phones'].append({'phone_type': p_types[i], 'phone_number': p_nums[i]})
+
+    e_types = request.form.getlist('email_type[]')
+    e_addrs = request.form.getlist('email_address[]')
+    for i in range(len(e_addrs)):
+        if e_addrs[i]: clean_data['emails'].append({'email_type': e_types[i], 'email_address': e_addrs[i]})
+
+    w_types = request.form.getlist('website_type[]')
+    w_urls = request.form.getlist('website_url[]')
+    for i in range(len(w_urls)):
+        if w_urls[i]: clean_data['websites'].append({'website_type': w_types[i], 'website_url': w_urls[i]})
+
+    lob_vals = request.form.getlist('lob[]')
+    for l in lob_vals:
+        if l: clean_data['lobs'].append(l)
+        
+    a_types = request.form.getlist('address_type[]')
+    a_lines = request.form.getlist('address_line1[]')
+    a_cities = request.form.getlist('city[]')
+    a_states = request.form.getlist('state[]')
+    a_zips = request.form.getlist('zip_code[]')
+    for i in range(len(a_lines)):
+        if a_lines[i]:
+            clean_data['addresses'].append({
+                'address_type': a_types[i], 
+                'address_line1': a_lines[i],
+                'city': a_cities[i],
+                'state': a_states[i],
+                'zip_code': a_zips[i]
+            })
+
+    json_payload = json.dumps(clean_data)
+    
     cursor.execute("""
         INSERT INTO carrier_edits 
         (carrier_id, submitter_name, submitter_email, field_name, old_value, new_value, status)
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-    """, (carrier_id, name, email, field, old_val, new_val))
+        VALUES (%s, %s, %s, 'FULL_RECORD', %s, %s, 'pending')
+    """, (carrier_id, clean_data['submitter_name'], clean_data['submitter_email'], old_value_json, json_payload))
     conn.commit()
     conn.close()
     
-    flash("Suggestion submitted for review!", "success")
-    return redirect(request.referrer)
+    flash(f"Success! Your edits for {clean_data['legal_name']} have been submitted for review.", "success")
+    return redirect(url_for('carrier_details', naic_code=request.form.get('cocode') or current_carrier_data['cocode']))
 
 # --- Admin Routes ---
 
@@ -187,19 +351,16 @@ def admin_login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
         user = cursor.fetchone()
         conn.close()
-
         if user and check_password_hash(user['password_hash'], password):
             login_user(User(user['user_id'], user['username'], user['role']))
             return redirect(url_for('admin_dashboard'))
         else:
             flash('Invalid credentials', 'danger')
-            
     return render_template('admin/login.html')
 
 @app.route('/admin/logout')
@@ -223,84 +384,158 @@ def admin_dashboard():
 @login_required
 @admin_required
 def admin_queue():
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    offset = (page - 1) * per_page
+    
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
+    
+    # Edits
     cursor.execute("""
-        SELECT e.*, c.legal_name, c.naic_code 
+        SELECT e.*, c.legal_name, n.cocode as naic_code
         FROM carrier_edits e
         JOIN carriers c ON e.carrier_id = c.carrier_id
+        LEFT JOIN naic n ON c.naic_id = n.naic_id
         WHERE e.status = 'pending'
         ORDER BY e.submitted_at DESC
-    """)
+        LIMIT %s OFFSET %s
+    """, (per_page, offset))
     edits = cursor.fetchall()
+    
+    # Count
+    cursor.execute("SELECT COUNT(*) as total FROM carrier_edits WHERE status = 'pending'")
+    total = cursor.fetchone()['total']
+    total_pages = (total + per_page - 1) // per_page
+    
     conn.close()
-    return render_template('admin/queue.html', edits=edits)
+    return render_template('admin/queue.html', edits=edits, page=page, total_pages=total_pages)
 
-@app.route('/admin/approve-edit/<int:edit_id>/<action>')
+@app.route('/admin/review/<int:edit_id>', methods=['GET', 'POST'])
 @login_required
 @admin_required
-def approve_edit(edit_id, action):
+def review_edit(edit_id):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     
     cursor.execute("SELECT * FROM carrier_edits WHERE edit_id = %s", (edit_id,))
-    edit = cursor.fetchone()
+    edit_request = cursor.fetchone()
     
-    if action == 'approve' and edit:
-        # Security: Whitelist allowed columns to prevent SQL injection
-        allowed_cols = ['legal_name', 'payer_id', 'phone_claims', 'address_claims_street', 'website']
-        if edit['field_name'] in allowed_cols:
-            # Update Carrier Table
-            query = f"UPDATE carriers SET {edit['field_name']} = %s WHERE carrier_id = %s"
-            cursor.execute(query, (edit['new_value'], edit['carrier_id']))
-            
-            # Add Audit Log
-            cursor.execute("INSERT INTO audit_log (carrier_id, action_type, description, changed_by) VALUES (%s, 'update', %s, %s)",
-                           (edit['carrier_id'], f"Updated {edit['field_name']}", f"Crowdsource: {edit['submitter_name']}"))
-            
-            # Mark Approved
-            cursor.execute("UPDATE carrier_edits SET status='approved', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
+    if not edit_request:
+        conn.close()
+        return redirect(url_for('admin_queue'))
+        
+    if request.method == 'POST':
+        action = request.form.get('action')
+        
+        if action == 'reject':
+            cursor.execute("UPDATE carrier_edits SET status='rejected', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
                            (current_user.id, edit_id))
-            flash("Edit approved.", "success")
-        else:
-            flash("Field not authorized for auto-update.", "danger")
+            conn.commit()
+            flash("Edit rejected.", "info")
             
-    elif action == 'reject':
-        cursor.execute("UPDATE carrier_edits SET status='rejected', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
-                       (current_user.id, edit_id))
-        flash("Edit rejected.", "warning")
+        elif action == 'approve':
+            final_json = request.form.get('final_json')
+            data = json.loads(final_json)
+            cid = edit_request['carrier_id']
+            
+            try:
+                # Update Main
+                cursor.execute("""
+                    UPDATE carriers SET 
+                    legal_name=%s, company_type=%s, sbs_company_number=%s, sbs_legacy_number=%s, other_carrier_names=%s, 
+                    am_best_rating=%s, state_domicile=%s, update_dt=CURDATE()
+                    WHERE carrier_id=%s
+                """, (data.get('legal_name'), data.get('company_type'), data.get('sbs_company_number'), 
+                      data.get('sbs_legacy_number'), data.get('other_carrier_names'), data.get('am_best_rating'), 
+                      data.get('state_domicile'), cid))
+                
+                # Update Payer
+                cursor.execute("SELECT payer_id FROM carriers WHERE carrier_id=%s", (cid,))
+                pid_res = cursor.fetchone()
+                if pid_res:
+                    pid = pid_res['payer_id']
+                    cursor.execute("""
+                        UPDATE payers SET payer_code=%s, enrollment=%s, attachment=%s, wc_auto=%s, available=%s, non_par=%s, 
+                        transaction=%s, other_payer_names=%s WHERE payer_id=%s
+                    """, (data.get('payer_code'), data.get('enrollment'), data.get('attachment'), data.get('wc_auto'),
+                          data.get('available'), data.get('non_par'), data.get('transaction'), data.get('other_payer_names'), pid))
+                
+                # Update NAIC
+                cursor.execute("SELECT naic_id FROM carriers WHERE carrier_id=%s", (cid,))
+                nid_res = cursor.fetchone()
+                if nid_res:
+                    nid = nid_res['naic_id']
+                    cursor.execute("""
+                        UPDATE naic SET cocode=%s, company_name=%s, short_name=%s, company_licensed_in=%s, insurance_types=%s 
+                        WHERE naic_id=%s
+                    """, (data.get('cocode'), data.get('company_name'), data.get('short_name'), 
+                          data.get('company_licensed_in'), data.get('insurance_types'), nid))
+                
+                # Full Replace: Phones
+                cursor.execute("DELETE FROM phones WHERE carrier_id=%s", (cid,))
+                for p in data.get('phones', []):
+                    cursor.execute("INSERT INTO phones (carrier_id, phone_type, phone_number, update_dt) VALUES (%s, %s, %s, CURDATE())",
+                                   (cid, p['phone_type'], p['phone_number']))
+                
+                # Full Replace: Emails
+                cursor.execute("DELETE FROM emails WHERE carrier_id=%s", (cid,))
+                for e in data.get('emails', []):
+                    cursor.execute("INSERT INTO emails (carrier_id, email_type, email_address, update_dt) VALUES (%s, %s, %s, CURDATE())",
+                                   (cid, e['email_type'], e['email_address']))
+                                   
+                # Full Replace: Websites
+                cursor.execute("DELETE FROM websites WHERE carrier_id=%s", (cid,))
+                for w in data.get('websites', []):
+                    cursor.execute("INSERT INTO websites (carrier_id, website_type, website_url, update_dt) VALUES (%s, %s, %s, CURDATE())",
+                                   (cid, w['website_type'], w['website_url']))
+                
+                # Full Replace: Addresses
+                cursor.execute("DELETE FROM addresses WHERE carrier_id=%s", (cid,))
+                for a in data.get('addresses', []):
+                    cursor.execute("""INSERT INTO addresses (carrier_id, address_type, address_line1, city, state, zip_code, update_dt) 
+                                      VALUES (%s, %s, %s, %s, %s, %s, CURDATE())""",
+                                   (cid, a['address_type'], a['address_line1'], a['city'], a['state'], a['zip_code']))
+                
+                # Full Replace: LOBs
+                cursor.execute("DELETE FROM line_of_business WHERE carrier_id=%s", (cid,))
+                for l in data.get('lobs', []):
+                    cursor.execute("INSERT INTO line_of_business (carrier_id, lob, update_dt) VALUES (%s, %s, CURDATE())",
+                                   (cid, l))
 
-    conn.commit()
+                # Log
+                cursor.execute("INSERT INTO audit_log (carrier_id, action_type, description, changed_by) VALUES (%s, 'full_update', %s, %s)",
+                               (cid, "Full Record Update via Admin Panel", f"Submitter: {edit_request['submitter_name']}"))
+                
+                cursor.execute("UPDATE carrier_edits SET status='approved', reviewed_by=%s, reviewed_at=NOW() WHERE edit_id=%s", 
+                               (current_user.id, edit_id))
+                
+                conn.commit()
+                flash("Changes approved and database updated successfully.", "success")
+                
+            except Exception as e:
+                conn.rollback()
+                flash(f"Error applying changes: {e}", "danger")
+                print(e)
+        
+        conn.close()
+        return redirect(url_for('admin_queue'))
+
+    try:
+        proposed_data = json.loads(edit_request['new_value'])
+        original_data = json.loads(edit_request['old_value']) if edit_request['old_value'] else {}
+    except:
+        proposed_data = {}
+        original_data = {}
+        
     conn.close()
-    return redirect(url_for('admin_queue'))
+    return render_template('admin/edit_review.html', edit=edit_request, data=proposed_data, original=original_data)
 
 @app.route('/admin/bulk-upload', methods=['POST'])
 @login_required
 @admin_required
 def bulk_upload():
-    file = request.files['csv_file']
-    if not file: return redirect(url_for('admin_dashboard'))
-    
-    try:
-        df = pd.read_csv(file)
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        success_count = 0
-        
-        for _, row in df.iterrows():
-            # Simple logic: check if Payer ID exists, if not, insert
-            cursor.execute("SELECT carrier_id FROM carriers WHERE payer_id = %s", (row['payer_id'],))
-            if not cursor.fetchone():
-                cursor.execute("INSERT INTO carriers (legal_name, naic_code, payer_id, state_domicile) VALUES (%s, %s, %s, %s)",
-                               (row['legal_name'], row['naic_code'], row['payer_id'], row['state_domicile']))
-                success_count += 1
-        
-        conn.commit()
-        conn.close()
-        flash(f"Successfully uploaded {success_count} new carriers.", "success")
-    except Exception as e:
-        flash(f"Error uploading CSV: {e}", "danger")
-
+    flash("Bulk upload requires update for new schema.", "warning")
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/users')
@@ -318,7 +553,6 @@ def admin_users():
 @login_required
 @admin_required
 def admin_config():
-    # In a real app, you'd fetch these from a DB table, not the config file directly
     return render_template('admin/email_config.html', config=app.config)
 
 if __name__ == '__main__':
